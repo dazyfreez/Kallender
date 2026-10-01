@@ -3,7 +3,7 @@ HOME_STATION = "München Sendlinger Tor"  # Deine nächste Haltestelle
 
 # Geheime iCal-URLs (aus Google Kalender & TUMonline)
 ICAL_URLS = {
-    "google": "https://calendar.google.com/calendar/ical/.../basic.ics", //das it noch nicht fix
+    "google": "https://calendar.google.com/calendar/ical/.../basic.ics", #das ist noch nicht fix
     "tum": "https://campus.tum.de/tumonline/.../iCal?...&pToken=...",
 }
 
