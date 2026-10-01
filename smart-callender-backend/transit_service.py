@@ -1,41 +1,82 @@
 # transit_service.py
 from datetime import datetime
-from pyhafas import HafasClient
-from pyhafas.profile import DBProfile
-
-client = HafasClient(DBProfile())
+import requests
 
 
-def query_route(origin_name: str, dest_name: str, target_arrival: datetime):
-  origin = client.locations(origin_name)[0]
-  dest = client.locations(dest_name)[0]
+def get_station_id(station_name: str) -> str | None:
+  """Sucht nach einer Station und liefert deren globale MVG-ID."""
+  url = "https://www.mvg.de/api/bgw-pt/v3/locations"
+  params = {"query": station_name}
+  headers = {"User-Agent": "SmartCalendar/1.0"}
 
-  journeys = client.journeys(
-      origin=origin,
-      destination=dest,
-      date=target_arrival,  # HAFAS plant Verbindungen passend zur Ankunftszeit
-  )
+  try:
+    res = requests.get(url, params=params, headers=headers, timeout=5)
+    res.raise_for_status()
+    locations = res.json()
+    if locations:
+      # Erste gefundene Haltestelle
+      return locations[0].get("globalId")
+  except Exception as e:
+    print(f"Fehler bei Haltestellensuche ({station_name}): {e}")
+  return None
 
-  if not journeys:
+
+def query_route(
+    origin_name: str, dest_name: str, target_arrival: datetime
+) -> dict | None:
+  """Holt Live-Abfahrten an der Heimathaltestelle passend zur Richtung."""
+  origin_id = get_station_id(origin_name)
+  if not origin_id:
+    print(f"Start-Haltestelle '{origin_name}' nicht gefunden.")
     return None
 
-  best = journeys[0]
-  first_leg = (
-      best.legs[1]
-      if best.legs[0].name == "Fußweg" and len(best.legs) > 1
-      else best.legs[0]
-  )
-
-  delay_min = (
-      int(first_leg.departureDelay.total_seconds() / 60)
-      if first_leg.departureDelay
-      else 0
-  )
-
-  return {
-      "line": first_leg.name,
-      "direction": first_leg.direction,
-      "departure": first_leg.departure.strftime("%H:%M"),
-      "delay": delay_min,
-      "total_duration": int(best.duration.total_seconds() / 60),
+  url = "https://www.mvg.de/api/bgw-pt/v3/departures"
+  params = {
+      "globalId": origin_id,
+      "limit": 10,
+      "offsetInMinutes": 0,  # Abfahrten ab jetzt
   }
+  headers = {"User-Agent": "SmartCalendar/1.0"}
+
+  try:
+    res = requests.get(url, params=params, headers=headers, timeout=5)
+    res.raise_for_status()
+    departures = res.json()
+
+    if not departures:
+      return None
+
+    # Suche nach einer Abfahrt, die grob zur Zielrichtung passt,
+    # oder nimm die nächste reguläre Verbindung:
+    matching_dep = None
+    dest_lower = dest_name.lower()
+
+    for dep in departures:
+      dest_title = dep.get("destination", "").lower()
+      # Prüfen, ob der Zug in Richtung des Ziels fährt (z. B. U6 Richtung Garching)
+      if dest_lower in dest_title or any(
+          part in dest_title for part in dest_lower.split()
+      ):
+        matching_dep = dep
+        break
+
+    # Falls kein exakter Richtungs-Match, nimm die allernächste Abfahrt
+    best = matching_dep if matching_dep else departures[0]
+
+    planned_time = datetime.fromtimestamp(best.get("plannedDepartureTime") / 1000)
+    actual_time = datetime.fromtimestamp(
+        best.get("realtimeDepartureTime", best.get("plannedDepartureTime")) / 1000
+    )
+    delay_min = max(0, int((actual_time - planned_time).total_seconds() / 60))
+
+    return {
+        "line": best.get("label"),  # z. B. "U6"
+        "direction": best.get("destination"),  # z. B. "Garching-Forschungszentrum"
+        "departure": planned_time.strftime("%H:%M"),
+        "delay": delay_min,
+        "is_cancelled": best.get("cancelled", False),
+    }
+
+  except Exception as e:
+    print(f"Fehler beim Abruf der MVG-Abfahrten: {e}")
+    return None
