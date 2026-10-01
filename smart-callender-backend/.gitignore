@@ -1,0 +1,12 @@
+# Virtuelle Umgebung (Pakete nicht ins Repository laden)
+.venv/
+
+# Umgebungsvariablen & geheime Links/Token
+.env
+
+# Python Cache-Dateien
+__pycache__/
+*.pyc
+
+# Betriebssystem-Dateien (z. B. auf macOS)
+.DS_Store
