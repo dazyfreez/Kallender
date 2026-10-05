@@ -1,53 +1,138 @@
 # transit_service.py
-from datetime import datetime
-from pyhafas import HafasClient
-from pyhafas.profile import OEBBProfile
+from datetime import datetime, timedelta
+import requests
 
-# Trick: Das ÖBB-Profil liefert uns problemlos alle MVG-Echtzeitdaten!
-client = HafasClient(OEBBProfile())
+HEADERS = {"User-Agent": "SmartCalendarDashboard/1.0"}
 
-def query_route(origin_name: str, dest_name: str, target_arrival: datetime):
+# Cache-Speicher: Verhindert minütliches Überlasten der API
+_ROUTE_CACHE = {
+    "key": None,
+    "timestamp": None,
+    "data": None
+}
+
+def get_location_id(query_str: str) -> str | None:
+    """Löst einen Namen/eine Adresse in eine eindeutige HAFAS-ID auf."""
+    url = "https://v6.db.transport.rest/locations"
+    params = {"query": query_str, "results": 1}
     try:
-        # 1. Start und Ziel in IDs auflösen
-        origin = client.locations(origin_name)[0]
-        dest = client.locations(dest_name)[0]
+        res = requests.get(url, params=params, headers=HEADERS, timeout=8)
+        res.raise_for_status()
+        results = res.json()
+        if results and len(results) > 0:
+            return results[0].get("id")
+    except Exception as e:
+        print(f"Fehler bei Locations-Suche für '{query_str}': {e}")
+    return None
 
-        # 2. Komplette Route (Journey) passend zur Ankunftszeit suchen
-        journeys = client.journeys(
-            origin=origin,
-            destination=dest,
-            date=target_arrival
-        )
 
+def query_route(origin_name: str, dest_name: str, target_arrival: datetime | None = None) -> dict | None:
+    """Sucht eine Verbindung mit Umstiegen passend zur Zielzeit (inkl. Cache & 20s Timeout)."""
+    global _ROUTE_CACHE
+    
+    # Cache-Schlüssel bilden (Start + Ziel + Ziel-Uhrzeit)
+    arrival_str = target_arrival.strftime("%Y-%m-%d %H:%M") if target_arrival else "now"
+    cache_key = f"{origin_name}->{dest_name}@{arrival_str}"
+
+    # Wenn vor weniger als 3 Minuten abgefragt: Cache zurückgeben
+    now = datetime.now()
+    if _ROUTE_CACHE["key"] == cache_key and _ROUTE_CACHE["timestamp"]:
+        if now - _ROUTE_CACHE["timestamp"] < timedelta(minutes=3):
+            return _ROUTE_CACHE["data"]
+
+    print(f"-> Berechne neue Route: '{origin_name}' -> '{dest_name}'...")
+
+    origin_id = get_location_id(origin_name)
+    dest_id = get_location_id(dest_name)
+
+    if not origin_id or not dest_id:
+        print(f"Start- oder Zielort konnte nicht aufgelöst werden.")
+        return None
+
+    url = "https://v6.db.transport.rest/journeys"
+    params = {
+        "from": origin_id,
+        "to": dest_id,
+        "results": 1,
+        "stopovers": "false"
+    }
+
+    if target_arrival:
+        # ISO-Format ohne Zeitzonen-Offset übergeben, um Encoding-Probleme zu vermeiden
+        params["arrival"] = target_arrival.strftime("%Y-%m-%dT%H:%M:%S")
+
+    try:
+        # Timeout auf 20 Sekunden erhöht
+        res = requests.get(url, params=params, headers=HEADERS, timeout=20)
+        res.raise_for_status()
+        data = res.json()
+
+        journeys = data.get("journeys", [])
         if not journeys:
+            print("Keine Route zur gewählten Zeit gefunden.")
             return None
 
         best = journeys[0]
         legs_data = []
+        first_transit_departure = None
 
-        # 3. Alle Umstiege (Legs) auslesen
-        for leg in best.legs:
-            delay_min = int(leg.departureDelay.total_seconds() / 60) if leg.departureDelay else 0
+        for leg in best.get("legs", []):
+            is_walk = leg.get("walking", False)
             
-            # Falls es ein Fußweg ist, nehmen wir den Zielort als Richtung
-            direction = leg.direction if leg.direction else leg.destination.name
+            if is_walk:
+                line_name = "Fußweg"
+                direction = leg.get("destination", {}).get("name", "Fußweg")
+            else:
+                line_name = leg.get("line", {}).get("name", "ÖPNV")
+                direction = leg.get("direction", leg.get("destination", {}).get("name"))
+
+            dep_raw = leg.get("plannedDeparture") or leg.get("departure")
+            if not dep_raw:
+                continue
+
+            dep_dt = datetime.fromisoformat(dep_raw)
+            dep_clock = dep_dt.strftime("%H:%M")
+
+            delay_sec = leg.get("departureDelay")
+            delay_min = int(delay_sec / 60) if delay_sec else 0
 
             legs_data.append({
-                "name": leg.name,  # z. B. "U 6" oder "Fußweg"
+                "name": line_name,
                 "direction": direction,
-                "departure": leg.departure.strftime("%H:%M"),
+                "departure": dep_clock,
                 "delay": delay_min
             })
 
-        # Für die rote Kalender-Linie brauchen wir den allerersten Start (nach einem möglichen Fußweg)
-        first_transit_leg = best.legs[1] if best.legs[0].name == "Fußweg" and len(best.legs) > 1 else best.legs[0]
+            if not is_walk and not first_transit_departure:
+                first_transit_departure = dep_clock
 
-        return {
-            "departure": first_transit_leg.departure.strftime("%H:%M"),
+        first_dep = best["legs"][0].get("departure") or best["legs"][0].get("plannedDeparture")
+        last_arr = best["legs"][-1].get("arrival") or best["legs"][-1].get("plannedArrival")
+
+        total_duration = 0
+        if first_dep and last_arr:
+            duration_td = datetime.fromisoformat(last_arr) - datetime.fromisoformat(first_dep)
+            total_duration = max(0, int(duration_td.total_seconds() / 60))
+
+        fallback_dep = legs_data[0]["departure"] if legs_data else "00:00"
+
+        result = {
+            "departure": first_transit_departure or fallback_dep,
             "legs": legs_data,
-            "total_duration": int(best.duration.total_seconds() / 60)
+            "total_duration": total_duration
         }
 
+        # Cache aktualisieren
+        _ROUTE_CACHE["key"] = cache_key
+        _ROUTE_CACHE["timestamp"] = now
+        _ROUTE_CACHE["data"] = result
+
+        print(f"-> Route erfolgreich ermittelt ({len(legs_data)} Abschnitte).")
+        return result
+
+    except requests.exceptions.Timeout:
+        print("-> Zeitüberschreitung: Routenserver hat nicht rechtzeitig geantwortet.")
+        return _ROUTE_CACHE.get("data")  # Fallback auf alte Daten, falls vorhanden
     except Exception as e:
-        print(f"Fehler bei Routenabfrage über ÖBB: {e}")
+        print(f"Fehler bei Routenabfrage: {e}")
         return None
