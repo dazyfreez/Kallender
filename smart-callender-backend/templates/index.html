@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Smart Calendar</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Linke Seite: Aktuelle Zeit & MVG Abfahrten -->
+        <div class="sidebar" id="sidebar">
+            <h1 id="clock">00:00</h1>
+            <div id="transit-info">Lade Verbindungen...</div>
+        </div>
+
+        <!-- Rechte Seite: Der vertikale Kalender -->
+        <div class="calendar-container">
+            <div id="timeline"></div> <!-- Hier rendern wir per JS die Termine -->
+            <div id="now-line"></div> <!-- Zeigt die aktuelle Uhrzeit -->
+            <div id="leave-line" style="display: none;">LOSGEHEN!</div>
+        </div>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
