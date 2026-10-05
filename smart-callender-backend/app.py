@@ -17,7 +17,7 @@ def build_dashboard_data():
   print(f"\n[{datetime.now(LOCAL_TZ).strftime('%H:%M:%S')}] Aktualisiere API Daten...")
 
   # 1. Kalender abfragen
-  upcoming = fetch_upcoming_events(ICAL_URLS, hours_ahead=12)
+  upcoming = fetch_upcoming_events(ICAL_URLS, hours_ahead=24)
 
   # 2. Termine für das Frontend aufbereiten (Farben & JS-lesbare Zeiten)
   frontend_events = []
