@@ -1,82 +1,53 @@
 # transit_service.py
 from datetime import datetime
-import requests
+from pyhafas import HafasClient
+from pyhafas.profile import OEBBProfile
 
+# Trick: Das ÖBB-Profil liefert uns problemlos alle MVG-Echtzeitdaten!
+client = HafasClient(OEBBProfile())
 
-def get_station_id(station_name: str) -> str | None:
-  """Sucht nach einer Station und liefert deren globale MVG-ID."""
-  url = "https://www.mvg.de/api/bgw-pt/v3/locations"
-  params = {"query": station_name}
-  headers = {"User-Agent": "SmartCalendar/1.0"}
+def query_route(origin_name: str, dest_name: str, target_arrival: datetime):
+    try:
+        # 1. Start und Ziel in IDs auflösen
+        origin = client.locations(origin_name)[0]
+        dest = client.locations(dest_name)[0]
 
-  try:
-    res = requests.get(url, params=params, headers=headers, timeout=5)
-    res.raise_for_status()
-    locations = res.json()
-    if locations:
-      # Erste gefundene Haltestelle
-      return locations[0].get("globalId")
-  except Exception as e:
-    print(f"Fehler bei Haltestellensuche ({station_name}): {e}")
-  return None
+        # 2. Komplette Route (Journey) passend zur Ankunftszeit suchen
+        journeys = client.journeys(
+            origin=origin,
+            destination=dest,
+            date=target_arrival
+        )
 
+        if not journeys:
+            return None
 
-def query_route(
-    origin_name: str, dest_name: str, target_arrival: datetime
-) -> dict | None:
-  """Holt Live-Abfahrten an der Heimathaltestelle passend zur Richtung."""
-  origin_id = get_station_id(origin_name)
-  if not origin_id:
-    print(f"Start-Haltestelle '{origin_name}' nicht gefunden.")
-    return None
+        best = journeys[0]
+        legs_data = []
 
-  url = "https://www.mvg.de/api/bgw-pt/v3/departures"
-  params = {
-      "globalId": origin_id,
-      "limit": 10,
-      "offsetInMinutes": 0,  # Abfahrten ab jetzt
-  }
-  headers = {"User-Agent": "SmartCalendar/1.0"}
+        # 3. Alle Umstiege (Legs) auslesen
+        for leg in best.legs:
+            delay_min = int(leg.departureDelay.total_seconds() / 60) if leg.departureDelay else 0
+            
+            # Falls es ein Fußweg ist, nehmen wir den Zielort als Richtung
+            direction = leg.direction if leg.direction else leg.destination.name
 
-  try:
-    res = requests.get(url, params=params, headers=headers, timeout=5)
-    res.raise_for_status()
-    departures = res.json()
+            legs_data.append({
+                "name": leg.name,  # z. B. "U 6" oder "Fußweg"
+                "direction": direction,
+                "departure": leg.departure.strftime("%H:%M"),
+                "delay": delay_min
+            })
 
-    if not departures:
-      return None
+        # Für die rote Kalender-Linie brauchen wir den allerersten Start (nach einem möglichen Fußweg)
+        first_transit_leg = best.legs[1] if best.legs[0].name == "Fußweg" and len(best.legs) > 1 else best.legs[0]
 
-    # Suche nach einer Abfahrt, die grob zur Zielrichtung passt,
-    # oder nimm die nächste reguläre Verbindung:
-    matching_dep = None
-    dest_lower = dest_name.lower()
+        return {
+            "departure": first_transit_leg.departure.strftime("%H:%M"),
+            "legs": legs_data,
+            "total_duration": int(best.duration.total_seconds() / 60)
+        }
 
-    for dep in departures:
-      dest_title = dep.get("destination", "").lower()
-      # Prüfen, ob der Zug in Richtung des Ziels fährt (z. B. U6 Richtung Garching)
-      if dest_lower in dest_title or any(
-          part in dest_title for part in dest_lower.split()
-      ):
-        matching_dep = dep
-        break
-
-    # Falls kein exakter Richtungs-Match, nimm die allernächste Abfahrt
-    best = matching_dep if matching_dep else departures[0]
-
-    planned_time = datetime.fromtimestamp(best.get("plannedDepartureTime") / 1000)
-    actual_time = datetime.fromtimestamp(
-        best.get("realtimeDepartureTime", best.get("plannedDepartureTime")) / 1000
-    )
-    delay_min = max(0, int((actual_time - planned_time).total_seconds() / 60))
-
-    return {
-        "line": best.get("label"),  # z. B. "U6"
-        "direction": best.get("destination"),  # z. B. "Garching-Forschungszentrum"
-        "departure": planned_time.strftime("%H:%M"),
-        "delay": delay_min,
-        "is_cancelled": best.get("cancelled", False),
-    }
-
-  except Exception as e:
-    print(f"Fehler beim Abruf der MVG-Abfahrten: {e}")
-    return None
+    except Exception as e:
+        print(f"Fehler bei Routenabfrage über ÖBB: {e}")
+        return None
